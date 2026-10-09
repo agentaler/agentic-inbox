@@ -19,7 +19,16 @@ import { SendEmailRequestSchema } from "./lib/schemas";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
-import { requireMailbox, type MailboxContext } from "./lib/mailbox";
+import { requireAdmin, requireMailbox, requireMailboxAccess, type MailboxContext } from "./lib/mailbox";
+import {
+	deleteMailboxPassword,
+	hasMailboxPassword,
+	MAX_PASSWORD_LENGTH,
+	normalizeAddress,
+	setMailboxPassword,
+	validatePasswordStrength,
+} from "./lib/auth";
+import authRoutes from "./routes/auth";
 
 type AppContext = Context<MailboxContext>;
 
@@ -29,6 +38,7 @@ const CreateMailboxBody = z.object({
 	email: z.string().email(),
 	name: z.string().min(1),
 	settings: z.record(z.any()).optional(), // unvalidated — agentSystemPrompt goes straight to AI
+	password: z.string().max(MAX_PASSWORD_LENGTH).optional(),
 });
 
 const DraftBody = z.object({
@@ -81,7 +91,27 @@ app.use("/api/*", cors({
 		return undefined;
 	},
 }));
+
+// Every API call needs a signed-in user, except the sign-in endpoints themselves.
+// Writes must come from this site (blocks cross-site form posts, incl. login CSRF).
+app.use("/api/*", async (c, next) => {
+	if (c.req.method !== "GET" && c.req.method !== "HEAD" && c.req.method !== "OPTIONS") {
+		const origin = c.req.header("origin");
+		if (origin) {
+			let sameSite = false;
+			try { sameSite = new URL(origin).host === new URL(c.req.url).host; } catch { /* invalid origin */ }
+			if (!sameSite) return c.json({ error: "Cross-site request blocked" }, 403);
+		}
+	}
+	if (c.req.path.startsWith("/api/v1/auth/")) return next();
+	if (!c.get("session")) return c.json({ error: "Not signed in" }, 401);
+	return next();
+});
+app.use("/api/v1/admin/*", requireAdmin);
+app.use("/api/v1/mailboxes/:mailboxId", requireMailboxAccess);
 app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
+
+app.route("/", authRoutes);
 
 // -- Config ---------------------------------------------------------
 
@@ -95,16 +125,28 @@ app.get("/api/v1/config", (c) => {
 // -- Mailboxes ------------------------------------------------------
 
 app.get("/api/v1/mailboxes", async (c) => {
+	const session = c.get("session");
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
-	return c.json(allMailboxes.map((m) => ({ ...m, name: m.id })));
+	if (session?.role !== "admin") {
+		const own = session?.role === "mailbox" ? session.mailbox : "";
+		return c.json(allMailboxes.filter((m) => m.id === own).map((m) => ({ ...m, name: m.id })));
+	}
+	const withLogin = await Promise.all(
+		allMailboxes.map(async (m) => ({ ...m, name: m.id, hasPassword: await hasMailboxPassword(c.env, m.id) })),
+	);
+	return c.json(withLogin);
 });
 
-app.post("/api/v1/mailboxes", async (c) => {
-	const { name, settings, email: rawEmail } = CreateMailboxBody.parse(await c.req.json());
+app.post("/api/v1/mailboxes", requireAdmin, async (c) => {
+	const { name, settings, email: rawEmail, password } = CreateMailboxBody.parse(await c.req.json());
 	const email = rawEmail.toLowerCase();
 	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
 	if (allowedAddresses.length > 0 && !allowedAddresses.map((a) => a.toLowerCase()).includes(email)) {
 		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES" }, 403);
+	}
+	if (password) {
+		const weak = validatePasswordStrength(password);
+		if (weak) return c.json({ error: weak }, 400);
 	}
 	const key = `mailboxes/${email}.json`;
 	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
@@ -113,7 +155,8 @@ app.post("/api/v1/mailboxes", async (c) => {
 	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
 	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
 	await stub.getFolders();
-	return c.json({ id: email, email, name, settings: finalSettings }, 201);
+	if (password) await setMailboxPassword(c.env, email, password);
+	return c.json({ id: email, email, name, settings: finalSettings, hasPassword: !!password }, 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
@@ -132,11 +175,12 @@ app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
 });
 
-app.delete("/api/v1/mailboxes/:mailboxId", async (c) => {
+app.delete("/api/v1/mailboxes/:mailboxId", requireAdmin, async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const key = `mailboxes/${mailboxId}.json`;
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
+	await deleteMailboxPassword(c.env, normalizeAddress(mailboxId));
 	return c.body(null, 204);
 });
 
@@ -345,22 +389,33 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
 	return result;
 }
 
-async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
+/**
+ * Store an inbound email in the matching mailbox.
+ * Returns the mailbox it was stored in, or undefined if it was ignored.
+ */
+async function receiveEmail(event: { raw: ReadableStream; rawSize: number; to?: string }, env: Env, ctx: ExecutionContext): Promise<string | undefined> {
 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
 	const parsedEmail = await new PostalMime().parse(rawEmail);
 
-	if (!parsedEmail.to?.length || !parsedEmail.to[0].address) throw new Error("received email with empty to");
-
 	const allowedAddresses = ((env.EMAIL_ADDRESSES ?? []) as string[]).map((a) => a.toLowerCase());
-	const allRecipients = parsedEmail.to.map((t) => t.address?.toLowerCase()).filter(Boolean) as string[];
+	const allRecipients = (parsedEmail.to || []).map((t) => t.address?.toLowerCase()).filter(Boolean) as string[];
 	const ccRecipients = (parsedEmail.cc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
 	const bccRecipients = (parsedEmail.bcc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
 
+	// Prefer the envelope recipient (the address Email Routing delivered to), so mail
+	// where the mailbox is only in Cc/Bcc still lands in the right place.
+	const envelopeTo = event.to?.toLowerCase();
 	let mailboxId: string | undefined;
-	if (allowedAddresses.length > 0) {
-		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
-	} else { mailboxId = allRecipients[0]; }
+	if (envelopeTo && (allowedAddresses.length === 0 || allowedAddresses.includes(envelopeTo))
+		&& (await env.BUCKET.head(`mailboxes/${envelopeTo}.json`))) {
+		mailboxId = envelopeTo;
+	} else {
+		if (!allRecipients.length) throw new Error("received email with empty to");
+		if (allowedAddresses.length > 0) {
+			mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
+			if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
+		} else { mailboxId = allRecipients[0]; }
+	}
 	if (!mailboxId) throw new Error("received email with no valid recipient address");
 
 	const messageId = crypto.randomUUID();
@@ -407,6 +462,26 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		method: "POST", headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
 	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
+
+	return mailboxId;
 }
 
-export { app, receiveEmail };
+/**
+ * If the mailbox has forwarding turned on, send a copy of the message on.
+ * The destination must be a verified address in Cloudflare Email Routing.
+ * Failures are logged but never undo delivery to the inbox.
+ */
+async function forwardCopy(message: { forward(rcptTo: string, headers?: Headers): Promise<unknown> }, env: Env, mailboxId: string) {
+	try {
+		const obj = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
+		if (!obj) return;
+		const settings = (await obj.json()) as { forwarding?: { enabled?: boolean; email?: string } };
+		const target = settings.forwarding?.enabled ? (settings.forwarding.email || "").trim().toLowerCase() : "";
+		if (!target || target === mailboxId || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(target)) return;
+		await message.forward(target);
+	} catch (e) {
+		console.error(`Forwarding a copy for ${mailboxId} failed:`, (e as Error).message);
+	}
+}
+
+export { app, receiveEmail, forwardCopy };

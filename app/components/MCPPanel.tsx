@@ -108,6 +108,10 @@ export default function MCPPanel() {
 							{mcpUrl}
 						</div>
 					</div>
+					<p className="text-[11px] text-kumo-subtle leading-relaxed">
+						Clients must send <span className="font-mono">Authorization: Bearer &lt;MCP_TOKEN&gt;</span>. Your
+						admin sets MCP_TOKEN as a secret on the Worker; MCP is off until they do.
+					</p>
 				</div>
 
 				{/* Available tools */}

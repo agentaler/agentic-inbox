@@ -35,6 +35,17 @@ https://github.com/cloudflare/agentic-inbox/issues/4#issuecomment-4269118513
 2. If you see `Cloudflare Access must be configured in production`, this application is intentionally enforcing Cloudflare Access so your inbox is not exposed to anyone on the internet.
    * Resolution: enable Access using [one-click Cloudflare Access for Workers](https://developers.cloudflare.com/changelog/post/2025-10-03-one-click-access-for-workers/), then set the `POLICY_AUD` and `TEAM_DOMAIN` Worker secrets from the modal values.
 
+## Sign-in (this fork)
+
+This fork replaces the Cloudflare Access gate with its own sign-in page, so colleagues don't need a Cloudflare account.
+
+- Everyone signs in at `/login` with their **mailbox address and password**, and can only open that mailbox (API, agent and pages are all checked server-side).
+- The **admin** signs in with the login `admin` and the password in the `ADMIN_PASSWORD` Worker secret. Admins see every mailbox, create mailboxes and set passwords (key icon on the Mailboxes page). Changing a password signs that mailbox out everywhere.
+- A request carrying a valid Cloudflare Access JWT (`POLICY_AUD` + `TEAM_DOMAIN`) is also treated as admin, so you can keep Access on an admin-only hostname or path if you like.
+- Each mailbox can **forward a copy** of incoming mail (Settings → Forward a copy). The address must be a verified destination in Email Routing.
+- Optional secrets: `SESSION_SECRET` (32+ chars; otherwise a random key is generated and kept in R2) and `MCP_TOKEN` (lets MCP clients use `/mcp` with `Authorization: Bearer <token>`; otherwise MCP is admin-only).
+- Login attempts are rate limited (10/min per IP and per address) with the `LOGIN_LIMITER` binding.
+
 ## Features
 
 - **Full email client** — Send and receive emails via Cloudflare Email Routing with a rich text composer, reply/forward threading, folder organization, search, and attachments

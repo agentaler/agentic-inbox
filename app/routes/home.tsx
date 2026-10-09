@@ -12,10 +12,10 @@ import {
 	Text,
 	useKumoToastManager,
 } from "@cloudflare/kumo";
-import { EnvelopeIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
+import { EnvelopeIcon, KeyIcon, PlusIcon, SignOutIcon, TrashIcon } from "@phosphor-icons/react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Link as RouterLink } from "react-router";
+import { Link as RouterLink, Navigate } from "react-router";
 import api from "~/services/api";
 import {
 	useCreateMailbox,
@@ -23,13 +23,30 @@ import {
 	useMailboxes,
 } from "~/queries/mailboxes";
 import { queryKeys } from "~/queries/keys";
+import { signOut, useSession } from "~/queries/session";
 
 export function meta() {
 	return [{ title: "Agentic Inbox" }];
 }
 
 export default function HomeRoute() {
+	const { data: session, isLoading: sessionLoading } = useSession();
+	if (sessionLoading || !session) {
+		return (
+			<div className="flex justify-center items-center min-h-screen">
+				<Loader size="lg" />
+			</div>
+		);
+	}
+	if (session.role === "mailbox") {
+		return <Navigate to={`/mailbox/${session.mailbox}/emails/inbox`} replace />;
+	}
+	return <AdminHome showAdminTip={session.via === "access" && !session.adminLogin} />;
+}
+
+function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 	const toastManager = useKumoToastManager();
+	const queryClient = useQueryClient();
 	const { data: mailboxes = [], refetch: refetchMailboxes, isFetched: mailboxesFetched } = useMailboxes();
 	const createMailbox = useCreateMailbox();
 	const deleteMailbox = useDeleteMailbox();
@@ -55,6 +72,12 @@ export default function HomeRoute() {
 		email: string;
 	} | null>(null);
 	const [isDeleting, setIsDeleting] = useState(false);
+	const [newPassword, setNewPassword] = useState("");
+	const [passwordTarget, setPasswordTarget] = useState<string | null>(null);
+	const [passwordValue, setPasswordValue] = useState("");
+	const [passwordConfirm, setPasswordConfirm] = useState("");
+	const [passwordError, setPasswordError] = useState<string | null>(null);
+	const [isSavingPassword, setIsSavingPassword] = useState(false);
 
 	// Set default domain when config loads
 	useEffect(() => {
@@ -96,15 +119,20 @@ export default function HomeRoute() {
 			setCreateError("Please fill in all fields");
 			return;
 		}
+		if (newPassword && newPassword.length < 8) {
+			setCreateError("Password must be at least 8 characters.");
+			return;
+		}
 		const email = `${newPrefix}@${selectedDomain}`;
 		const name = newName || newPrefix;
 		setIsCreating(true);
 		try {
-			await createMailbox.mutateAsync({ email, name });
+			await createMailbox.mutateAsync({ email, name, password: newPassword || undefined });
 			toastManager.add({ title: "Mailbox created successfully!" });
 			setIsCreateOpen(false);
 			setNewPrefix("");
 			setNewName("");
+			setNewPassword("");
 		} catch (err: unknown) {
 			const message = (err instanceof Error ? err.message : null) || "Failed to create mailbox";
 			setCreateError(message);
@@ -128,12 +156,46 @@ export default function HomeRoute() {
 		}
 	};
 
+
+	const openPasswordDialog = (mailboxId: string) => {
+		setPasswordTarget(mailboxId);
+		setPasswordValue("");
+		setPasswordConfirm("");
+		setPasswordError(null);
+	};
+
+	const handleSetPassword = async (e: FormEvent) => {
+		e.preventDefault();
+		if (!passwordTarget) return;
+		setPasswordError(null);
+		if (passwordValue.length < 8) {
+			setPasswordError("Password must be at least 8 characters.");
+			return;
+		}
+		if (passwordValue !== passwordConfirm) {
+			setPasswordError("The two passwords don't match.");
+			return;
+		}
+		setIsSavingPassword(true);
+		try {
+			await api.setMailboxPassword(passwordTarget, passwordValue);
+			toastManager.add({ title: `Password set for ${passwordTarget}` });
+			setPasswordTarget(null);
+			queryClient.invalidateQueries({ queryKey: queryKeys.mailboxes.all });
+		} catch (err: unknown) {
+			setPasswordError((err instanceof Error ? err.message : null) || "Failed to set password");
+		} finally {
+			setIsSavingPassword(false);
+		}
+	};
+
 	const isConfigured = emailAddresses.length > 0;
 	const accounts = isConfigured
 		? emailAddresses.map((addr) => ({
 				id: addr,
 				email: addr,
 				name: addr.split("@")[0] || addr,
+				hasPassword: mailboxes.find((m) => m.email.toLowerCase() === addr.toLowerCase())?.hasPassword,
 			}))
 		: mailboxes;
 
@@ -143,21 +205,36 @@ export default function HomeRoute() {
 		<div className="min-h-screen bg-kumo-recessed">
 			<div className="mx-auto max-w-2xl px-4 py-8 md:px-6 md:py-16">
 				<div className="mb-8">
-					<div className="flex items-center justify-between">
+					<div className="flex items-center justify-between gap-2">
 						<h1 className="text-2xl font-bold text-kumo-default">Mailboxes</h1>
-						{!isConfigured && (
-							<Button
-								variant="primary"
-								icon={<PlusIcon size={16} />}
-								onClick={() => setIsCreateOpen(true)}
-							>
-								New Mailbox
+						<div className="flex items-center gap-2">
+							{!isConfigured && (
+								<Button
+									variant="primary"
+									icon={<PlusIcon size={16} />}
+									onClick={() => setIsCreateOpen(true)}
+								>
+									New Mailbox
+								</Button>
+							)}
+							<Button variant="ghost" icon={<SignOutIcon size={16} />} onClick={() => signOut()}>
+								Sign out
 							</Button>
-						)}
+						</div>
 					</div>
 					{domains.length > 0 && (
 						<p className="text-sm text-kumo-subtle mt-1">
 							{domains.join(", ")}
+						</p>
+					)}
+					<p className="text-sm text-kumo-subtle mt-3">
+						Give each colleague their mailbox address and a password (key icon). They sign in at{" "}
+						<span className="font-medium text-kumo-default">/login</span> and only see their own mailbox.
+					</p>
+					{showAdminTip && (
+						<p className="text-xs text-kumo-subtle mt-2">
+							Tip: add an ADMIN_PASSWORD secret to this Worker so you can also sign in as{" "}
+							<span className="font-medium">admin</span> without Cloudflare.
 						</p>
 					)}
 				</div>
@@ -183,10 +260,27 @@ export default function HomeRoute() {
 									<div className="text-sm font-medium text-kumo-default truncate">
 										{account.name}
 									</div>
-									<div className="text-sm text-kumo-subtle">
+									<div className="text-sm text-kumo-subtle truncate">
 										{account.email}
 									</div>
 								</div>
+								{account.hasPassword === false && (
+									<span className="shrink-0 rounded-full bg-kumo-fill px-2 py-0.5 text-xs text-kumo-subtle">
+										No password
+									</span>
+								)}
+								<Button
+									variant="ghost"
+									size="sm"
+									shape="square"
+									icon={<KeyIcon size={16} />}
+									aria-label={`Set password for ${account.email}`}
+									onClick={(e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										openPasswordDialog(account.id);
+									}}
+								/>
 								{!isConfigured && (
 									<Button
 										variant="ghost"
@@ -270,13 +364,13 @@ export default function HomeRoute() {
 								<span className="text-sm text-kumo-subtle">@</span>
 								{domains.length > 1 ? (
 									<div className="flex-1">
-							<Select
-								aria-label="Domain"
-								value={selectedDomain}
-								onValueChange={(value) => {
-									if (value) setSelectedDomain(value);
-								}}
-							>
+										<Select
+											aria-label="Domain"
+											value={selectedDomain}
+											onValueChange={(value) => {
+												if (value) setSelectedDomain(value);
+											}}
+										>
 											{domains.map((d) => (
 												<Select.Option key={d} value={d}>
 													{d}
@@ -298,6 +392,14 @@ export default function HomeRoute() {
 							value={newName}
 							onChange={(e) => setNewName(e.target.value)}
 						/>
+						<Input
+							label="Sign-in password (optional, 8+ characters)"
+							type="password"
+							autoComplete="new-password"
+							size="sm"
+							value={newPassword}
+							onChange={(e) => setNewPassword(e.target.value)}
+						/>
 						<div className="flex justify-end gap-2 pt-2">
 							<Dialog.Close
 								render={(props) => (
@@ -314,6 +416,61 @@ export default function HomeRoute() {
 								disabled={!selectedDomain}
 							>
 								Create
+							</Button>
+						</div>
+					</form>
+				</Dialog>
+			</Dialog.Root>
+
+			{/* Set Password Dialog */}
+			<Dialog.Root
+				open={passwordTarget !== null}
+				onOpenChange={(open) => {
+					if (!open) setPasswordTarget(null);
+				}}
+			>
+				<Dialog size="sm" className="p-6">
+					<Dialog.Title className="text-base font-semibold mb-1">
+						Set sign-in password
+					</Dialog.Title>
+					<Dialog.Description className="text-kumo-subtle text-sm mb-5">
+						For <strong className="text-kumo-default">{passwordTarget}</strong>. This replaces any old
+						password and signs the mailbox out everywhere.
+					</Dialog.Description>
+					<form onSubmit={handleSetPassword} className="space-y-4">
+						{passwordError && (
+							<Text variant="error" size="sm">
+								{passwordError}
+							</Text>
+						)}
+						<Input
+							label="New password"
+							type="password"
+							autoComplete="new-password"
+							size="sm"
+							value={passwordValue}
+							onChange={(e) => setPasswordValue(e.target.value)}
+							required
+						/>
+						<Input
+							label="Repeat password"
+							type="password"
+							autoComplete="new-password"
+							size="sm"
+							value={passwordConfirm}
+							onChange={(e) => setPasswordConfirm(e.target.value)}
+							required
+						/>
+						<div className="flex justify-end gap-2 pt-2">
+							<Dialog.Close
+								render={(props) => (
+									<Button {...props} variant="secondary" size="sm">
+										Cancel
+									</Button>
+								)}
+							/>
+							<Button type="submit" variant="primary" size="sm" loading={isSavingPassword}>
+								Save password
 							</Button>
 						</div>
 					</form>

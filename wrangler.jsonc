@@ -10,12 +10,23 @@
 		"nodejs_compat"
 	],
 	"vars": {
-		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
-		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
-		// The worker now fails closed outside local development if Access is not configured.
-		"DOMAINS": "example.com",
+		// Sign-in: each mailbox has its own password (set by an admin on the Mailboxes page).
+		// Secrets: ADMIN_PASSWORD enables the "admin" login. Optional: SESSION_SECRET, MCP_TOKEN,
+		// and POLICY_AUD + TEAM_DOMAIN (a valid Cloudflare Access JWT then signs you in as admin).
+		"DOMAINS": "humanedge.asia",
 		"EMAIL_ADDRESSES": []
 	},
+	"ratelimits": [
+		{
+			// Login attempts: 10 per minute per IP and per address.
+			"name": "LOGIN_LIMITER",
+			"namespace_id": "3001",
+			"simple": {
+				"limit": 10,
+				"period": 60
+			}
+		}
+	],
 	"send_email": [
 		{
 			"name": "EMAIL",

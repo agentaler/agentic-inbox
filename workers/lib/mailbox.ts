@@ -4,24 +4,47 @@
 
 /**
  * Hono middleware to handle repetitive Mailbox Durable Object instantiation.
- * Checks if the mailbox exists in R2, then instantiates the DO stub
- * and attaches it to the Hono context (`c.var.mailboxStub`).
+ * Checks the signed-in user may open the mailbox, checks it exists in R2,
+ * then instantiates the DO stub and attaches it to the Hono context
+ * (`c.var.mailboxStub`).
  */
 import { createMiddleware } from "hono/factory";
 import type { MailboxDO } from "../durableObject";
 import type { Env } from "../types";
+import { canAccessMailbox, safeDecode, type Session } from "./auth";
 
 export type MailboxContext = {
 	Bindings: Env;
 	Variables: {
 		mailboxStub: DurableObjectStub<MailboxDO>;
+		session: Session | null;
 	};
 };
+
+/** Rejects requests for a mailbox the signed-in user may not open. */
+export const requireMailboxAccess = createMiddleware<MailboxContext>(async (c, next) => {
+	const rawId = c.req.param("mailboxId");
+	if (!rawId) return c.json({ error: "Mailbox ID required" }, 400);
+	if (!canAccessMailbox(c.get("session"), rawId)) {
+		return c.json({ error: "You don't have access to this mailbox" }, 403);
+	}
+	await next();
+});
+
+export const requireAdmin = createMiddleware<MailboxContext>(async (c, next) => {
+	if (c.get("session")?.role !== "admin") {
+		return c.json({ error: "Admin only" }, 403);
+	}
+	await next();
+});
 
 export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) => {
 	const rawId = c.req.param("mailboxId");
 	if (!rawId) return c.json({ error: "Mailbox ID required" }, 400);
-	const mailboxId = decodeURIComponent(rawId);
+	const mailboxId = safeDecode(rawId);
+	if (!canAccessMailbox(c.get("session"), mailboxId)) {
+		return c.json({ error: "You don't have access to this mailbox" }, 403);
+	}
 
 	// Verify mailbox exists
 	const key = `mailboxes/${mailboxId}.json`;
@@ -36,6 +59,6 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 	const stub = ns.get(id);
 
 	c.set("mailboxStub", stub);
-	
+
 	await next();
 });

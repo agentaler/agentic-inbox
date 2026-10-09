@@ -42,6 +42,11 @@ async function request<T>(
 
 		if (!res.ok) {
 			const body = await res.json().catch(() => ({}));
+			// Signed out (or session expired): send the user to the sign-in page.
+			if (res.status === 401 && typeof window !== "undefined" && !url.startsWith("/api/v1/auth/")) {
+				const here = window.location.pathname + window.location.search;
+				window.location.assign(here === "/" ? "/login" : `/login?next=${encodeURIComponent(here)}`);
+			}
 			throw new ApiError(res.status, body as Record<string, unknown>);
 		}
 
@@ -94,15 +99,29 @@ interface EmailListResponse {
 
 // ---------- API client ----------
 
+export type SessionInfo =
+	| { role: "admin"; via: "access" | "password"; adminLogin: boolean }
+	| { role: "mailbox"; mailbox: string };
+
 const api = {
+	// Sign-in
+	me: () => get<SessionInfo>("/api/v1/auth/me"),
+	login: (email: string, password: string) =>
+		post<{ role: "admin" | "mailbox"; mailbox?: string }>("/api/v1/auth/login", { email, password }),
+	logout: () => post<{ ok: boolean; accessLogout?: boolean }>("/api/v1/auth/logout"),
+	changePassword: (currentPassword: string, newPassword: string) =>
+		put<{ ok: boolean }>("/api/v1/auth/password", { currentPassword, newPassword }),
+	setMailboxPassword: (mailboxId: string, password: string) =>
+		put<{ ok: boolean }>(`/api/v1/admin/mailboxes/${mailboxId}/password`, { password }),
+
 	// Config
 	getConfig: () =>
 		get<{ domains: string[]; emailAddresses: string[] }>("/api/v1/config"),
 
 	// Mailboxes
 	listMailboxes: () => get<Mailbox[]>("/api/v1/mailboxes"),
-	createMailbox: (email: string, name: string, settings?: unknown) =>
-		post<Mailbox>("/api/v1/mailboxes", { email, name, settings }),
+	createMailbox: (email: string, name: string, settings?: unknown, password?: string) =>
+		post<Mailbox>("/api/v1/mailboxes", { email, name, settings, ...(password ? { password } : {}) }),
 	getMailbox: (mailboxId: string) =>
 		get<Mailbox>(`/api/v1/mailboxes/${mailboxId}`),
 	updateMailbox: (mailboxId: string, settings: unknown) =>

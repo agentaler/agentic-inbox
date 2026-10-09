@@ -21,6 +21,8 @@ export interface Mailbox {
 	email: string;
 	name: string;
 	settings?: MailboxSettings;
+	/** Admin list only: whether a sign-in password is set for this mailbox. */
+	hasPassword?: boolean;
 }
 
 export interface Email {
