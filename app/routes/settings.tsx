@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router";
 import { useMailbox, useUpdateMailbox } from "~/queries/mailboxes";
 import { useSession } from "~/queries/session";
+import TwoFactorCard from "~/components/TwoFactorCard";
 import api from "~/services/api";
 
 // Placeholder shown in the textarea when no custom prompt is set.
@@ -41,8 +42,8 @@ export default function SettingsRoute() {
 	}, [mailbox]);
 
 	const handleChangePassword = async () => {
-		if (newPassword.length < 8) {
-			toastManager.add({ title: "New password must be at least 8 characters", variant: "error" });
+		if (newPassword.length < 10) {
+			toastManager.add({ title: "New password must be at least 10 characters", variant: "error" });
 			return;
 		}
 		if (newPassword !== confirmPassword) {
@@ -171,7 +172,7 @@ export default function SettingsRoute() {
 								onChange={(e) => setCurrentPassword(e.target.value)}
 							/>
 							<Input
-								label="New password (8+ characters)"
+								label="New password (10+ characters)"
 								type="password"
 								autoComplete="new-password"
 								value={newPassword}
@@ -197,6 +198,8 @@ export default function SettingsRoute() {
 						</div>
 					</div>
 				)}
+
+				{session?.role === "mailbox" && <TwoFactorCard enabled={session.twoFactor} />}
 
 				{/* Agent System Prompt */}
 				<div className="rounded-lg border border-kumo-line bg-kumo-base p-5">

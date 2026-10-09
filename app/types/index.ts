@@ -23,6 +23,8 @@ export interface Mailbox {
 	settings?: MailboxSettings;
 	/** Admin list only: whether a sign-in password is set for this mailbox. */
 	hasPassword?: boolean;
+	/** Admin list only: whether two-step verification is on. */
+	hasTwoFactor?: boolean;
 }
 
 export interface Email {

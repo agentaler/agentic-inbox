@@ -24,6 +24,7 @@ import {
 } from "~/queries/mailboxes";
 import { queryKeys } from "~/queries/keys";
 import { signOut, useSession } from "~/queries/session";
+import TwoFactorCard from "~/components/TwoFactorCard";
 
 export function meta() {
 	return [{ title: "Agentic Inbox" }];
@@ -41,10 +42,15 @@ export default function HomeRoute() {
 	if (session.role === "mailbox") {
 		return <Navigate to={`/mailbox/${session.mailbox}/emails/inbox`} replace />;
 	}
-	return <AdminHome showAdminTip={session.via === "access" && !session.adminLogin} />;
+	return (
+		<AdminHome
+			showAdminTip={session.via === "access" && !session.adminLogin}
+			adminTwoFactor={session.via === "password" ? session.twoFactor : null}
+		/>
+	);
 }
 
-function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
+function AdminHome({ showAdminTip, adminTwoFactor }: { showAdminTip: boolean; adminTwoFactor: boolean | null }) {
 	const toastManager = useKumoToastManager();
 	const queryClient = useQueryClient();
 	const { data: mailboxes = [], refetch: refetchMailboxes, isFetched: mailboxesFetched } = useMailboxes();
@@ -78,6 +84,7 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 	const [passwordConfirm, setPasswordConfirm] = useState("");
 	const [passwordError, setPasswordError] = useState<string | null>(null);
 	const [isSavingPassword, setIsSavingPassword] = useState(false);
+	const [resetTwoFactor, setResetTwoFactor] = useState(false);
 
 	// Set default domain when config loads
 	useEffect(() => {
@@ -119,8 +126,8 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 			setCreateError("Please fill in all fields");
 			return;
 		}
-		if (newPassword && newPassword.length < 8) {
-			setCreateError("Password must be at least 8 characters.");
+		if (newPassword && newPassword.length < 10) {
+			setCreateError("Password must be at least 10 characters.");
 			return;
 		}
 		const email = `${newPrefix}@${selectedDomain}`;
@@ -162,14 +169,15 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 		setPasswordValue("");
 		setPasswordConfirm("");
 		setPasswordError(null);
+		setResetTwoFactor(false);
 	};
 
 	const handleSetPassword = async (e: FormEvent) => {
 		e.preventDefault();
 		if (!passwordTarget) return;
 		setPasswordError(null);
-		if (passwordValue.length < 8) {
-			setPasswordError("Password must be at least 8 characters.");
+		if (passwordValue.length < 10) {
+			setPasswordError("Password must be at least 10 characters.");
 			return;
 		}
 		if (passwordValue !== passwordConfirm) {
@@ -178,7 +186,7 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 		}
 		setIsSavingPassword(true);
 		try {
-			await api.setMailboxPassword(passwordTarget, passwordValue);
+			await api.setMailboxPassword(passwordTarget, passwordValue, resetTwoFactor);
 			toastManager.add({ title: `Password set for ${passwordTarget}` });
 			setPasswordTarget(null);
 			queryClient.invalidateQueries({ queryKey: queryKeys.mailboxes.all });
@@ -196,6 +204,7 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 				email: addr,
 				name: addr.split("@")[0] || addr,
 				hasPassword: mailboxes.find((m) => m.email.toLowerCase() === addr.toLowerCase())?.hasPassword,
+				hasTwoFactor: mailboxes.find((m) => m.email.toLowerCase() === addr.toLowerCase())?.hasTwoFactor,
 			}))
 		: mailboxes;
 
@@ -239,6 +248,12 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 					)}
 				</div>
 
+				{adminTwoFactor !== null && (
+					<div className="mb-6">
+						<TwoFactorCard enabled={adminTwoFactor} />
+					</div>
+				)}
+
 				{isLoading ? (
 					<div className="flex justify-center py-20">
 						<Loader size="lg" />
@@ -264,6 +279,11 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 										{account.email}
 									</div>
 								</div>
+								{account.hasTwoFactor && (
+									<span className="shrink-0 rounded-full bg-kumo-fill px-2 py-0.5 text-xs text-kumo-subtle">
+										2-step on
+									</span>
+								)}
 								{account.hasPassword === false && (
 									<span className="shrink-0 rounded-full bg-kumo-fill px-2 py-0.5 text-xs text-kumo-subtle">
 										No password
@@ -393,7 +413,7 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 							onChange={(e) => setNewName(e.target.value)}
 						/>
 						<Input
-							label="Sign-in password (optional, 8+ characters)"
+							label="Sign-in password (optional, 10+ characters)"
 							type="password"
 							autoComplete="new-password"
 							size="sm"
@@ -461,6 +481,17 @@ function AdminHome({ showAdminTip }: { showAdminTip: boolean }) {
 							onChange={(e) => setPasswordConfirm(e.target.value)}
 							required
 						/>
+						{accounts.find((a) => a.id === passwordTarget)?.hasTwoFactor && (
+							<label className="flex items-center gap-2 text-sm text-kumo-default cursor-pointer">
+								<input
+									type="checkbox"
+									checked={resetTwoFactor}
+									onChange={(e) => setResetTwoFactor(e.target.checked)}
+									className="h-4 w-4"
+								/>
+								Also turn off two-step verification (lost phone)
+							</label>
+						)}
 						<div className="flex justify-end gap-2 pt-2">
 							<Dialog.Close
 								render={(props) => (

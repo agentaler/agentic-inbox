@@ -21,13 +21,15 @@ import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireAdmin, requireMailbox, requireMailboxAccess, type MailboxContext } from "./lib/mailbox";
 import {
+	checkNewPassword,
+	clearFailedLogins,
 	deleteMailboxPassword,
 	hasMailboxPassword,
 	MAX_PASSWORD_LENGTH,
 	normalizeAddress,
 	setMailboxPassword,
-	validatePasswordStrength,
 } from "./lib/auth";
+import { deleteTotp, totpEnabled } from "./lib/totp";
 import authRoutes from "./routes/auth";
 
 type AppContext = Context<MailboxContext>;
@@ -132,7 +134,12 @@ app.get("/api/v1/mailboxes", async (c) => {
 		return c.json(allMailboxes.filter((m) => m.id === own).map((m) => ({ ...m, name: m.id })));
 	}
 	const withLogin = await Promise.all(
-		allMailboxes.map(async (m) => ({ ...m, name: m.id, hasPassword: await hasMailboxPassword(c.env, m.id) })),
+		allMailboxes.map(async (m) => ({
+			...m,
+			name: m.id,
+			hasPassword: await hasMailboxPassword(c.env, m.id),
+			hasTwoFactor: await totpEnabled(c.env, m.id),
+		})),
 	);
 	return c.json(withLogin);
 });
@@ -145,8 +152,8 @@ app.post("/api/v1/mailboxes", requireAdmin, async (c) => {
 		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES" }, 403);
 	}
 	if (password) {
-		const weak = validatePasswordStrength(password);
-		if (weak) return c.json({ error: weak }, 400);
+		const problem = await checkNewPassword(password, email);
+		if (problem) return c.json({ error: problem }, 400);
 	}
 	const key = `mailboxes/${email}.json`;
 	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
@@ -180,7 +187,8 @@ app.delete("/api/v1/mailboxes/:mailboxId", requireAdmin, async (c) => {
 	const key = `mailboxes/${mailboxId}.json`;
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
-	await deleteMailboxPassword(c.env, normalizeAddress(mailboxId));
+	const login = normalizeAddress(mailboxId);
+	await Promise.all([deleteMailboxPassword(c.env, login), deleteTotp(c.env, login), clearFailedLogins(c.env, login)]);
 	return c.body(null, 204);
 });
 

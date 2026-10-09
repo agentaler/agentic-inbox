@@ -22,6 +22,8 @@ export default function LoginRoute() {
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [isSubmitting, setIsSubmitting] = useState(false);
+	const [needCode, setNeedCode] = useState(false);
+	const [code, setCode] = useState("");
 
 	const handleSubmit = async (e: FormEvent) => {
 		e.preventDefault();
@@ -30,17 +32,28 @@ export default function LoginRoute() {
 			setError("Enter your email and password.");
 			return;
 		}
+		if (needCode && code.trim().length < 6) {
+			setError("Enter the 6-digit code from your authenticator app.");
+			return;
+		}
 		setIsSubmitting(true);
 		try {
-			const res = await api.login(email.trim(), password);
+			const res = await api.login(email.trim(), password, needCode ? code.trim() : undefined);
 			const home = res.role === "mailbox" && res.mailbox ? `/mailbox/${res.mailbox}/emails/inbox` : "/";
 			window.location.assign(safeNext(searchParams.get("next")) ?? home);
 		} catch (err) {
-			setError(
-				err instanceof ApiError && err.status !== 500
-					? err.message
-					: "Couldn't sign in right now. Please try again.",
-			);
+			if (err instanceof ApiError && err.body.twoFactorRequired) {
+				// Password was right; now ask for the authenticator code.
+				setError(needCode ? err.message : null);
+				setNeedCode(true);
+				setCode("");
+			} else {
+				setError(
+					err instanceof ApiError && err.status !== 500
+						? err.message
+						: "Couldn't sign in right now. Please try again.",
+				);
+			}
 			setIsSubmitting(false);
 		}
 	};
@@ -88,6 +101,18 @@ export default function LoginRoute() {
 						onChange={(e) => setPassword(e.target.value)}
 						required
 					/>
+					{needCode && (
+						<Input
+							label="6-digit code from your authenticator app"
+							name="code"
+							inputMode="numeric"
+							autoComplete="one-time-code"
+							placeholder="123456"
+							value={code}
+							onChange={(e) => setCode(e.target.value)}
+							autoFocus
+						/>
+					)}
 					<Button type="submit" variant="primary" className="w-full justify-center" loading={isSubmitting}>
 						Sign in
 					</Button>

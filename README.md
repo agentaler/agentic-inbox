@@ -44,7 +44,11 @@ This fork replaces the Cloudflare Access gate with its own sign-in page, so coll
 - A request carrying a valid Cloudflare Access JWT (`POLICY_AUD` + `TEAM_DOMAIN`) is also treated as admin, so you can keep Access on an admin-only hostname or path if you like.
 - Each mailbox can **forward a copy** of incoming mail (Settings → Forward a copy). The address must be a verified destination in Email Routing.
 - Optional secrets: `SESSION_SECRET` (32+ chars; otherwise a random key is generated and kept in R2) and `MCP_TOKEN` (lets MCP clients use `/mcp` with `Authorization: Bearer <token>`; otherwise MCP is admin-only).
-- Login attempts are rate limited (10/min per IP and per address) with the `LOGIN_LIMITER` binding.
+- Login attempts are rate limited (10/min per IP and per address) with the `LOGIN_LIMITER` binding, and an address is locked for 15 minutes after 8 failed attempts.
+- **Two-step verification**: anyone (including admin) can turn on authenticator-app codes in Settings / on the Mailboxes page. Admins can turn it off for a mailbox when resetting its password (lost phone).
+- Passwords must be 10+ characters, can't contain the address, and are checked against known data breaches (Have I Been Pwned, k-anonymity).
+- Remote images in emails are blocked until the reader clicks "Show images" (no tracking pixels); inline images still show.
+- Security headers on every response (CSP, `frame-ancestors 'none'`, HSTS, `nosniff`, `no-referrer`), and API responses are `no-store`.
 
 ## Features
 

@@ -100,19 +100,22 @@ interface EmailListResponse {
 // ---------- API client ----------
 
 export type SessionInfo =
-	| { role: "admin"; via: "access" | "password"; adminLogin: boolean }
-	| { role: "mailbox"; mailbox: string };
+	| { role: "admin"; via: "access" | "password"; adminLogin: boolean; twoFactor: boolean }
+	| { role: "mailbox"; mailbox: string; twoFactor: boolean };
 
 const api = {
 	// Sign-in
 	me: () => get<SessionInfo>("/api/v1/auth/me"),
-	login: (email: string, password: string) =>
-		post<{ role: "admin" | "mailbox"; mailbox?: string }>("/api/v1/auth/login", { email, password }),
+	login: (email: string, password: string, code?: string) =>
+		post<{ role: "admin" | "mailbox"; mailbox?: string }>("/api/v1/auth/login", { email, password, ...(code ? { code } : {}) }),
 	logout: () => post<{ ok: boolean; accessLogout?: boolean }>("/api/v1/auth/logout"),
 	changePassword: (currentPassword: string, newPassword: string) =>
 		put<{ ok: boolean }>("/api/v1/auth/password", { currentPassword, newPassword }),
-	setMailboxPassword: (mailboxId: string, password: string) =>
-		put<{ ok: boolean }>(`/api/v1/admin/mailboxes/${mailboxId}/password`, { password }),
+	setMailboxPassword: (mailboxId: string, password: string, resetTwoFactor = false) =>
+		put<{ ok: boolean }>(`/api/v1/admin/mailboxes/${mailboxId}/password`, { password, resetTwoFactor }),
+	twoFactorSetup: () => post<{ secret: string; otpauthUrl: string }>("/api/v1/auth/2fa/setup"),
+	twoFactorEnable: (code: string) => post<{ ok: boolean }>("/api/v1/auth/2fa/enable", { code }),
+	twoFactorDisable: (code: string) => post<{ ok: boolean }>("/api/v1/auth/2fa/disable", { code }),
 
 	// Config
 	getConfig: () =>

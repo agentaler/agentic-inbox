@@ -32,6 +32,51 @@ const requestHandler = createRequestHandler(
 // Main app that wraps the API and adds React Router fallback
 const app = new Hono<MailboxContext>();
 
+// Security headers on everything the Worker returns.
+app.use("*", async (c, next) => {
+	await next();
+	const res = c.res;
+	if (res.status === 101 || res.webSocket) return; // WebSocket upgrades
+	let headers = res.headers;
+	try {
+		headers.set("X-Content-Type-Options", "nosniff");
+	} catch {
+		// Immutable headers (e.g. a response passed through from a Durable Object): copy it.
+		c.res = new Response(res.body, res);
+		headers = c.res.headers;
+		headers.set("X-Content-Type-Options", "nosniff");
+	}
+	const url = new URL(c.req.url);
+	headers.set("Referrer-Policy", "no-referrer");
+	headers.set("X-Frame-Options", "DENY");
+	headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+	headers.set("Cross-Origin-Opener-Policy", "same-origin");
+	if (url.protocol === "https:") headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+	if (url.pathname.startsWith("/api/") && !headers.has("Cache-Control")) headers.set("Cache-Control", "no-store");
+	if ((headers.get("Content-Type") || "").includes("text/html")) {
+		headers.set(
+			"Content-Security-Policy",
+			[
+				"default-src 'self'",
+				"script-src 'self' 'unsafe-inline'",
+				"style-src 'self' 'unsafe-inline'",
+				// https: is only for remote images the reader chooses to show inside an email.
+				"img-src 'self' data: blob: https:",
+				"media-src 'self' data: blob: https:",
+				"font-src 'self' data:",
+				`connect-src 'self' ${url.protocol === "https:" ? "wss" : "ws"}://${url.host}`,
+				"frame-src 'self' blob: data:",
+				"worker-src 'self' blob:",
+				"object-src 'none'",
+				"base-uri 'self'",
+				"form-action 'self'",
+				"frame-ancestors 'none'",
+			].join("; "),
+		);
+		headers.set("Cache-Control", "no-store");
+	}
+});
+
 // Work out who is signed in (session cookie, or Cloudflare Access JWT for admins).
 app.use("*", async (c, next) => {
 	c.set("session", await resolveSession(c));

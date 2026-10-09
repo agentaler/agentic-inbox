@@ -22,7 +22,7 @@ export type Session =
 
 export const SESSION_COOKIE = "inbox_session";
 export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
-export const MIN_PASSWORD_LENGTH = 8;
+export const MIN_PASSWORD_LENGTH = 10;
 export const MAX_PASSWORD_LENGTH = 512;
 
 // Workers caps PBKDF2 at 100,000 iterations.
@@ -30,6 +30,11 @@ const PBKDF2_ITERATIONS = 100_000;
 const AUTH_PREFIX = "auth/mailboxes/";
 const SESSION_KEY_OBJECT = "auth/session-key";
 const RECORD_CACHE_MS = 30_000;
+const LOCK_PREFIX = "auth/lock/";
+/** Failed sign-ins allowed per login within LOCK_WINDOW_MS before it is locked. */
+const MAX_FAILED_LOGINS = 8;
+const LOCK_WINDOW_MS = 15 * 60_000;
+const LOCK_DURATION_MS = 15 * 60_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -207,6 +212,94 @@ export function validatePasswordStrength(password: string): string | null {
 	if (password.length < MIN_PASSWORD_LENGTH) return `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
 	if (password.length > MAX_PASSWORD_LENGTH) return "Password is too long.";
 	return null;
+}
+
+/**
+ * Has this password appeared in a known data breach? Uses the Have I Been Pwned
+ * range API (k-anonymity: only the first 5 characters of the SHA-1 hash leave
+ * the Worker). Returns false if the check can't be completed.
+ */
+async function isBreachedPassword(password: string): Promise<boolean> {
+	try {
+		const digest = new Uint8Array(await crypto.subtle.digest("SHA-1", encoder.encode(password)));
+		const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+		const res = await fetch(`https://api.pwnedpasswords.com/range/${hex.slice(0, 5)}`, {
+			headers: { "Add-Padding": "true", "User-Agent": "agentic-inbox" },
+			signal: AbortSignal.timeout(3000),
+		});
+		if (!res.ok) return false;
+		const suffix = hex.slice(5);
+		for (const line of (await res.text()).split("\n")) {
+			const [hash, count] = line.trim().split(":");
+			if (hash === suffix && Number(count) > 0) return true;
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+/** Full check for a new password: length, not the address itself, not breached. */
+export async function checkNewPassword(password: string, login: string): Promise<string | null> {
+	const weak = validatePasswordStrength(password);
+	if (weak) return weak;
+	const lower = password.toLowerCase();
+	const local = login.split("@")[0];
+	if (lower === login.toLowerCase() || (local.length >= 4 && lower.includes(local))) {
+		return "Don't use the email address in the password.";
+	}
+	if (await isBreachedPassword(password)) {
+		return "This password has appeared in a data breach. Please choose a different one.";
+	}
+	return null;
+}
+
+// ── Lockout after repeated failures ────────────────────────────────
+
+interface LockRecord {
+	fails: number;
+	first: number;
+	lockedUntil?: number;
+}
+
+function lockKey(login: string): string {
+	return `${LOCK_PREFIX}${login.toLowerCase()}.json`;
+}
+
+/** Minutes until this login unlocks, or 0 if it isn't locked. */
+export async function lockedForMinutes(env: Env, login: string): Promise<number> {
+	const obj = await env.BUCKET.get(lockKey(login));
+	if (!obj) return 0;
+	try {
+		const rec = (await obj.json()) as LockRecord;
+		if (rec.lockedUntil && rec.lockedUntil > Date.now()) return Math.ceil((rec.lockedUntil - Date.now()) / 60_000);
+	} catch {
+		/* treat as unlocked */
+	}
+	return 0;
+}
+
+export async function recordFailedLogin(env: Env, login: string): Promise<void> {
+	const now = Date.now();
+	let rec: LockRecord = { fails: 0, first: now };
+	const obj = await env.BUCKET.get(lockKey(login));
+	if (obj) {
+		try {
+			rec = (await obj.json()) as LockRecord;
+		} catch {
+			/* start over */
+		}
+	}
+	if (now - rec.first > LOCK_WINDOW_MS || (rec.lockedUntil && rec.lockedUntil <= now)) {
+		rec = { fails: 0, first: now };
+	}
+	rec.fails += 1;
+	if (rec.fails >= MAX_FAILED_LOGINS) rec.lockedUntil = now + LOCK_DURATION_MS;
+	await env.BUCKET.put(lockKey(login), JSON.stringify(rec));
+}
+
+export async function clearFailedLogins(env: Env, login: string): Promise<void> {
+	await env.BUCKET.delete(lockKey(login));
 }
 
 export async function hasMailboxPassword(env: Env, mailbox: string): Promise<boolean> {
